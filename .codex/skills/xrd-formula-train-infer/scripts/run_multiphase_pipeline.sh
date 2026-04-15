@@ -8,12 +8,12 @@ SERVICE_NAME="xrd-service"
 CONTAINER_ROOT="/workspace/project"
 NOVEL_SPACE="$REPO_ROOT/libs/XRD-1.1/Novel-Space"
 CONTAINER_NOVEL_SPACE="$CONTAINER_ROOT/libs/XRD-1.1/Novel-Space"
-SKILL_TOOL="$CONTAINER_ROOT/.codex/skills/xrd-formula-train-infer/scripts/mp_formula_tool.py"
+MP_TOOL="$CONTAINER_ROOT/.codex/skills/xrd-formula-train-infer/scripts/mp_formula_tool.py"
 
-FORMULA_A=""
-FORMULA_B=""
-MATERIAL_ID_A=""
-MATERIAL_ID_B=""
+PHASE_LABELS=()
+MP_IDS=()
+LOCAL_CIFS=()
+MANUAL_REFERENCES=()
 SPECTRA_SOURCE="$REPO_ROOT/data"
 RUN_NAME=""
 NUM_SPECTRA="50"
@@ -25,27 +25,26 @@ MAX_ANGLE="60.0"
 usage() {
   cat <<'EOF'
 Usage:
-  run_pipeline.sh --formula-a A --formula-b B --material-id-a mp-xxx --material-id-b mp-yyy [options]
+  run_multiphase_pipeline.sh \
+    --phase-label LABEL \
+    [--phase-label LABEL ...] \
+    [--mp-material-id mp-xxxx ...] \
+    [--local-cif path/to/file.cif ...]
 
 Options:
-  --spectra-source PATH   Real spectra source. Default: ./data
-  --run-name NAME         Explicit run directory name
-  --num-spectra N         Simulated spectra per phase. Default: 50
-  --xrd-epochs N          XRD training epochs. Default: 50
-  --pdf-epochs N          PDF training epochs. Default: 50
-  --min-angle VALUE       Lower two-theta bound. Default: 20.0
-  --max-angle VALUE       Upper two-theta bound. Default: 60.0
+  --phase-label LABEL      Phase label used only for run naming/reporting. Repeatable.
+  --mp-material-id ID      Materials Project material ID to download. Repeatable.
+  --local-cif PATH         Local CIF to include in this run. Repeatable.
+  --manual-reference MAP   Create References entry directly and skip tabulate_cifs.
+                           Format: ReferenceName=SourceCifFilename
+  --spectra-source PATH    Real spectra source. Default: ./data
+  --run-name NAME          Explicit run directory name
+  --num-spectra N          Simulated spectra per phase. Default: 50
+  --xrd-epochs N           XRD training epochs. Default: 50
+  --pdf-epochs N           PDF training epochs. Default: 50
+  --min-angle VALUE        Lower two-theta bound. Default: 20.0
+  --max-angle VALUE        Upper two-theta bound. Default: 60.0
 EOF
-}
-
-require_arg() {
-  local name=$1
-  local value=$2
-  if [[ -z "$value" ]]; then
-    echo "[ERROR] Missing required argument: $name" >&2
-    usage >&2
-    exit 1
-  fi
 }
 
 slugify() {
@@ -96,7 +95,8 @@ copy_spectra() {
 
 link_workspace() {
   mkdir -p "$NOVEL_SPACE/figure"
-  rm -rf "$NOVEL_SPACE/Spectra" "$NOVEL_SPACE/All_CIFs" "$NOVEL_SPACE/Models" "$NOVEL_SPACE/References" "$NOVEL_SPACE/figure/real_data"
+  rm -rf "$NOVEL_SPACE/Spectra" "$NOVEL_SPACE/All_CIFs" "$NOVEL_SPACE/Models" \
+    "$NOVEL_SPACE/References" "$NOVEL_SPACE/figure/real_data"
   ln -snf "soft_link/Spectra/$RUN_NAME" "$NOVEL_SPACE/Spectra"
   ln -snf "soft_link/All_CIFs/$RUN_NAME" "$NOVEL_SPACE/All_CIFs"
   ln -snf "../soft_link/figure/$RUN_NAME" "$NOVEL_SPACE/figure/real_data"
@@ -112,22 +112,32 @@ persist_dir_as_link() {
   fi
 }
 
+require_nonempty_list() {
+  local label=$1
+  local count=$2
+  if [[ "$count" -eq 0 ]]; then
+    echo "[ERROR] At least one $label must be provided." >&2
+    usage >&2
+    exit 1
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --formula-a)
-      FORMULA_A=$2
+    --phase-label)
+      PHASE_LABELS+=("$2")
       shift 2
       ;;
-    --formula-b)
-      FORMULA_B=$2
+    --mp-material-id)
+      MP_IDS+=("$2")
       shift 2
       ;;
-    --material-id-a)
-      MATERIAL_ID_A=$2
+    --local-cif)
+      LOCAL_CIFS+=("$2")
       shift 2
       ;;
-    --material-id-b)
-      MATERIAL_ID_B=$2
+    --manual-reference)
+      MANUAL_REFERENCES+=("$2")
       shift 2
       ;;
     --spectra-source)
@@ -170,13 +180,22 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-require_arg "--formula-a" "$FORMULA_A"
-require_arg "--formula-b" "$FORMULA_B"
-require_arg "--material-id-a" "$MATERIAL_ID_A"
-require_arg "--material-id-b" "$MATERIAL_ID_B"
+require_nonempty_list "--phase-label" "${#PHASE_LABELS[@]}"
+if [[ "${#MP_IDS[@]}" -eq 0 && "${#LOCAL_CIFS[@]}" -eq 0 ]]; then
+  echo "[ERROR] Provide at least one --mp-material-id or --local-cif." >&2
+  usage >&2
+  exit 1
+fi
 
 if [[ -z "$RUN_NAME" ]]; then
-  RUN_NAME="$(slugify "$FORMULA_A")-vs-$(slugify "$FORMULA_B")-$(date +%Y%m%d-%H%M%S)"
+  RUN_SLUG=""
+  for label in "${PHASE_LABELS[@]}"; do
+    if [[ -n "$RUN_SLUG" ]]; then
+      RUN_SLUG+="-"
+    fi
+    RUN_SLUG+="$(slugify "$label")"
+  done
+  RUN_NAME="${RUN_SLUG}-$(date +%Y%m%d-%H%M%S)"
 fi
 
 CIF_RUN_DIR="$NOVEL_SPACE/soft_link/All_CIFs/$RUN_NAME"
@@ -190,7 +209,6 @@ if [[ -e "$CIF_RUN_DIR" || -e "$SPECTRA_RUN_DIR" || -e "$FIGURE_RUN_DIR" ]]; the
 fi
 
 mkdir -p "$CIF_RUN_DIR" "$SPECTRA_RUN_DIR" "$FIGURE_RUN_DIR" "$RESULTS_DIR"
-
 copy_spectra "$SPECTRA_SOURCE" "$SPECTRA_RUN_DIR"
 link_workspace
 mkdir -p "$FIGURE_RUN_DIR"
@@ -198,16 +216,55 @@ mkdir -p "$FIGURE_RUN_DIR"
 echo "[INFO] Starting container build/runtime..."
 LOCAL_UID="$(id -u)" LOCAL_GID="$(id -g)" docker compose -f "$COMPOSE_FILE" up -d --build
 
-echo "[INFO] Downloading CIFs for $MATERIAL_ID_A and $MATERIAL_ID_B ..."
-compose_exec "cd $CONTAINER_ROOT && python3 $SKILL_TOOL download --material-id $MATERIAL_ID_A --material-id $MATERIAL_ID_B --output-dir $CONTAINER_NOVEL_SPACE/All_CIFs --manifest download_manifest.json"
+if [[ "${#MP_IDS[@]}" -gt 0 ]]; then
+  MP_ARGS=""
+  for material_id in "${MP_IDS[@]}"; do
+    MP_ARGS+=" --material-id $material_id"
+  done
+  echo "[INFO] Downloading MP CIFs..."
+  compose_exec "cd $CONTAINER_ROOT && python3 $MP_TOOL download$MP_ARGS --output-dir $CONTAINER_NOVEL_SPACE/All_CIFs --manifest download_manifest.json"
+fi
+
+if [[ "${#LOCAL_CIFS[@]}" -gt 0 ]]; then
+  echo "[INFO] Copying local CIFs..."
+  for local_cif in "${LOCAL_CIFS[@]}"; do
+    if [[ ! -f "$local_cif" ]]; then
+      echo "[ERROR] Local CIF does not exist: $local_cif" >&2
+      exit 1
+    fi
+    cp "$local_cif" "$CIF_RUN_DIR/"
+  done
+fi
 
 echo "[INFO] Cleaning previous local Novel-Space state..."
 rm -rf "$NOVEL_SPACE/References" "$NOVEL_SPACE/Models" "$NOVEL_SPACE/result.csv" \
   "$NOVEL_SPACE/XRD.npy" "$NOVEL_SPACE/PDF.npy" "$NOVEL_SPACE/angle_ranges.csv" \
   "$NOVEL_SPACE/Model.pth" "$NOVEL_SPACE/PDF_Model.pth"
 
+if [[ "${#MANUAL_REFERENCES[@]}" -gt 0 ]]; then
+  echo "[INFO] Creating manual References and skipping tabulate_cifs..."
+  mkdir -p "$NOVEL_SPACE/References"
+  for mapping in "${MANUAL_REFERENCES[@]}"; do
+    ref_name=${mapping%%=*}
+    src_name=${mapping#*=}
+    if [[ -z "$ref_name" || -z "$src_name" || "$ref_name" == "$src_name" ]]; then
+      echo "[ERROR] Invalid --manual-reference mapping: $mapping" >&2
+      exit 1
+    fi
+    if [[ ! -f "$CIF_RUN_DIR/$src_name" ]]; then
+      echo "[ERROR] Manual reference source CIF not found in run directory: $src_name" >&2
+      exit 1
+    fi
+    cp "$CIF_RUN_DIR/$src_name" "$NOVEL_SPACE/References/${ref_name}.cif"
+  done
+fi
+
 echo "[INFO] Training XRD model..."
-compose_exec "cd $CONTAINER_NOVEL_SPACE && python3 src/construct_xrd_model.py --num_spectra=$NUM_SPECTRA --num_epochs=$XRD_EPOCHS --min_angle=$MIN_ANGLE --max_angle=$MAX_ANGLE --save"
+XRD_ARGS="--num_spectra=$NUM_SPECTRA --num_epochs=$XRD_EPOCHS --min_angle=$MIN_ANGLE --max_angle=$MAX_ANGLE --save"
+if [[ "${#MANUAL_REFERENCES[@]}" -gt 0 ]]; then
+  XRD_ARGS+=" --skip_filter"
+fi
+compose_exec "cd $CONTAINER_NOVEL_SPACE && python3 src/construct_xrd_model.py $XRD_ARGS"
 persist_dir_as_link "$NOVEL_SPACE/References" "$CIF_RUN_DIR/References"
 [[ -f "$NOVEL_SPACE/XRD.npy" ]] && cp "$NOVEL_SPACE/XRD.npy" "$RESULTS_DIR/XRD.npy"
 [[ -f "$CIF_RUN_DIR/download_manifest.json" ]] && cp "$CIF_RUN_DIR/download_manifest.json" "$RESULTS_DIR/download_manifest.json"
@@ -225,20 +282,20 @@ echo "[INFO] Running inference..."
 compose_exec "cd $CONTAINER_NOVEL_SPACE && python3 src/run_CNN.py --inc_pdf --show_indiv"
 [[ -f "$NOVEL_SPACE/result.csv" ]] && cp "$NOVEL_SPACE/result.csv" "$RESULTS_DIR/result.csv"
 
-cat > "$RESULTS_DIR/run_manifest.txt" <<EOF
-run_name=$RUN_NAME
-formula_a=$FORMULA_A
-formula_b=$FORMULA_B
-material_id_a=$MATERIAL_ID_A
-material_id_b=$MATERIAL_ID_B
-spectra_source=$SPECTRA_SOURCE
-cif_dir=$CIF_RUN_DIR
-spectra_dir=$SPECTRA_RUN_DIR
-figure_dir=$FIGURE_RUN_DIR
-results_csv=$RESULTS_DIR/result.csv
-models_dir=$CIF_RUN_DIR/Models
-references_dir=$CIF_RUN_DIR/References
-EOF
+{
+  echo "run_name=$RUN_NAME"
+  printf 'phase_labels=%s\n' "$(IFS=,; echo "${PHASE_LABELS[*]}")"
+  printf 'mp_material_ids=%s\n' "$(IFS=,; echo "${MP_IDS[*]}")"
+  printf 'local_cifs=%s\n' "$(IFS=,; echo "${LOCAL_CIFS[*]}")"
+  printf 'manual_references=%s\n' "$(IFS=,; echo "${MANUAL_REFERENCES[*]}")"
+  echo "spectra_source=$SPECTRA_SOURCE"
+  echo "cif_dir=$CIF_RUN_DIR"
+  echo "spectra_dir=$SPECTRA_RUN_DIR"
+  echo "figure_dir=$FIGURE_RUN_DIR"
+  echo "results_csv=$RESULTS_DIR/result.csv"
+  echo "models_dir=$CIF_RUN_DIR/Models"
+  echo "references_dir=$CIF_RUN_DIR/References"
+} > "$RESULTS_DIR/run_manifest.txt"
 
 echo "[DONE] Pipeline finished."
 echo "run_name=$RUN_NAME"
