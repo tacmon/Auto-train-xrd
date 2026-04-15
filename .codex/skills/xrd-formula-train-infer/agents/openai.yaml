@@ -1,0 +1,4 @@
+interface:
+  display_name: "XRD Formula Train Infer"
+  short_description: "Train XRD-1.1 from formula A/B and run inference on ./data"
+  default_prompt: "Use $xrd-formula-train-infer to pick CIFs from formula A/B, train the model, and save predictions for the real spectra under ./data."

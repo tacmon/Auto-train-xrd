@@ -7,6 +7,9 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: xrd-analyzer
+    working_dir: /workspace/project
+    volumes:
+      - ../:/workspace/project
     # 启用 tty 和标准输入，这样即使没有后台服务运行也能保持容器存活，方便您 exec 进去执行其它脚本
     tty: true
     stdin_open: true

@@ -1,61 +1,73 @@
-# Auto-train-xrd 🚀
+# Auto-train-xrd
 
-本项目是一个专为 XRD（X-ray Diffraction，X射线衍射）数据设计的自动化训练框架。它利用 LLM Agent（大语言模型代理）来自动化管理微调、超参数优化和训练流程，旨在提升 XRD 相位分析模型的性能与开发效率。
+本仓库现在是一个围绕 [XRD-1.1](https://github.com/tacmon/XRD-1.1) 的本地训练工作区，用于：
 
-## 🌟 核心特性
+- 用 Docker 提供一致的训练和推理环境
+- 管理真实 XRD 数据目录
+- 通过本仓库内的 Codex skill 自动完成 CIF 选择、训练、推理和结果保存
 
-*   **智能代理 (LLM Agent)**：内置大模型逻辑，能够根据训练日志自动调整策略。
-*   **子模块化设计**：集成 [XRD-1.1](https://github.com/tacmon/XRD-1.1) 作为核心算法库，保持算法与框架的解耦。
-*   **容器化运行**：提供完整的 Docker 配置，确保环境一致性与快速部署。
-*   **灵活配置**：通过 `configs/` 目录轻松定义超参数空间与训练任务。
+它不再维护单独的“大模型 API 客户端 / Agent 框架 / 超参数自动搜索入口”。如果你在使用 Codex，就直接让 Codex 调用仓库里的 skill 和脚本即可。
 
-## 📂 项目结构
+## 当前结构
 
 ```text
 Auto-train-xrd/
-├── agent/              # 存放 LLM Agent 的逻辑代码、Prompt 模板
+├── .codex/
+│   └── skills/
+│       └── xrd-formula-train-infer/   # 项目本地 Codex skill
 ├── libs/
-│   └── XRD-1.1/       # 核心算法库（Git Submodule）
-├── configs/            # 自动化训练的超参空间与任务配置
-├── docker/             # Dockerfile 与 docker-compose.yaml 环境定义
-├── data/               # 训练数据存放路径
-├── main.py             # 项目入口文件
-└── idea.md             # 项目设计思路与开发记录
+│   └── XRD-1.1/                       # 核心算法库（git submodule）
+├── docker/                            # 训练容器定义
+├── data/                              # 真实 XRD 数据
+├── idea.md                            # 历史设计记录
+└── README.md
 ```
 
-## 🚀 快速开始
+## 当前入口
 
-### 1. 克隆项目
-由于项目包含子模块，请务必使用 `--recursive` 参数：
+### 1. 容器环境
+
 ```bash
-git clone --recursive https://github.com/tacmon/Auto-train-xrd.git
-cd Auto-train-xrd
+docker compose -f docker/docker-compose.yaml up -d --build
 ```
 
-### 2. 环境部署
-我们推荐使用 Docker 进行部署。请确保已安装 `docker-compose`：
+### 2. Codex skill
+
+项目级 skill 位于：
+
+```text
+.codex/skills/xrd-formula-train-infer/
+```
+
+这个 skill 会围绕 `libs/XRD-1.1/Novel-Space` 完成：
+
+- 解析化学式 A 和可选的 B
+- 从 Materials Project 查询候选结构并下载 CIF
+- 训练 XRD 模型和 PDF 模型
+- 读取 `./data` 下真实谱图并保存预测结果
+- 当用户回复“不满意”时，保留 A 并重新尝试新的候选组合
+
+### 3. 直接脚本入口
+
+如果你不通过对话调用，也可以直接使用这两个脚本：
+
 ```bash
-cd docker
-docker-compose up -d --build
+python3 .codex/skills/xrd-formula-train-infer/scripts/mp_formula_tool.py --help
+bash .codex/skills/xrd-formula-train-infer/scripts/run_pipeline.sh --help
 ```
 
-### 3. 开始训练
-修改 `configs/` 中的配置后，运行主程序：
+## 环境变量
+
+根目录 `.env` 现在只需要保存与 Materials Project 相关的密钥：
+
 ```bash
-python main.py
+MP_API_KEY=your_materials_project_api_key_here
 ```
 
-## 🛠️ 配置说明
-*   **环境变量**：在根目录创建 `.env` 文件，配置 API Key 等敏感信息（参考 `.env.example`）。
-*   **训练脚本**：框架会自动调用 `libs/XRD-1.1` 中的训练脚本，您也可以根据需要自定义接口。
+不再需要额外配置大模型 API 地址、模型名或私有 SDK Key。
 
-## 📈 项目之间的跳转
-本项目是系列工具的一部分，您可以点击下方链接跳转到其他版本：
+## 说明
 
-*   [XRD-1.1](https://github.com/tacmon/XRD-1.1)：专注于 AlN216 的自动化分析工具箱与核心算法。
-*   [xrd_server](https://github.com/tacmon/xrd_server)：为 XRD 相位识别提供生产级 API 支持的后端服务。
-
-本项目致力于为您打造一个高效、稳健且智能的 XRD 模型训练体验。如果有任何建议，欢迎随时交流！
-
-> [!NOTE]
-> 本项目由 Google Gemini 2.0 Flash 大模型辅助开发与维护。
+- `docker/docker-compose.yaml` 已挂载整个仓库到容器内，因此容器可以直接访问当前项目文件。
+- 训练和推理的真实实现仍在 `libs/XRD-1.1/Novel-Space`。
+- `idea.md` 是历史设计草稿，不代表当前仓库的实际入口和目录结构。
