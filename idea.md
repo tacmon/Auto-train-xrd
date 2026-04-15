@@ -1,7 +1,7 @@
 # 我与GPT的对话记录
 
 > 注：这是早期设计草稿，包含已经废弃的 `agent/`、`configs/`、`main.py` 设想。
-> 当前仓库请以 `README.md`、`docker/`、`.codex/skills/` 和 `libs/XRD-1.1/Novel-Space/` 为准。
+> 当前仓库请以 `README.md`、`docker/`、`.codex/skills/` 和 `libs/XRD-1.1/` 为准。
 既然你决定采用 **Git Submodule** 方案，这不仅能保持 `XRD-1.1` 的独立性，还能让 `Auto-train-xrd` 优雅地管理依赖。
 
 作为一个 CS PhD，你可能需要频繁在不同服务器或环境中同步代码，这个方案的优势在于它能通过 `.gitmodules` 文件自动记录依赖关系。
