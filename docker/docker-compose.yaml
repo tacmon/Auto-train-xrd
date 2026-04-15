@@ -7,7 +7,11 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: xrd-analyzer
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     working_dir: /workspace/project
+    environment:
+      HOME: /tmp
+      MPLCONFIGDIR: /tmp/matplotlib
     volumes:
       - ../:/workspace/project
     # 启用 tty 和标准输入，这样即使没有后台服务运行也能保持容器存活，方便您 exec 进去执行其它脚本
