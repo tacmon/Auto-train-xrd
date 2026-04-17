@@ -21,7 +21,7 @@ description: 当用户只给一个目标化学式 A，希望在当前 Auto-train
 - 真实数据范围，默认递归读取仓库 `./data` 下全部 `*.txt`、`*.xy`、`*.gk`
 - 候选负样本范围或禁止使用的负样本
 - 人工标签文件，或用于从文件名/目录名推断弱标签的规则
-- 满意阈值，例如“真实数据 processed_result 准确率至少 80%”
+- 满意阈值，例如“真实数据 processed_result 准确率至少 95%”
 
 ## 这个 skill 依赖什么
 
@@ -177,7 +177,8 @@ done
 - `evaluation_mode == weak_labels`
 - `labeled_rows >= 10`
 - `coverage >= 0.10`
-- 优先满足用户明确要求的真实数据 processed_result 指标，例如“准确率至少 80%”
+- 若用户未单独指定，默认完成阈值按真实数据 processed_result 准确率至少 `95%` 执行
+- 若用户明确要求了其他阈值，优先满足用户明确要求的真实数据 processed_result 指标，例如“准确率至少 95%”
 - 若存在目标正样本与负样本标签：
   - `precision >= 0.85`
   - `recall >= 0.70`
