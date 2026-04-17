@@ -1,4 +1,4 @@
 interface:
   display_name: "XRD Target Negative Loop"
-  short_description: "Iteratively find negatives for one target formula"
-  default_prompt: "Use $xrd-target-negative-loop to choose negatives for one target formula, iterate training with a subagent, and score processed real-data results."
+  short_description: "Iterate negatives by processed real-data results"
+  default_prompt: "Use $xrd-target-negative-loop to choose negatives for one target formula, iterate training with a subagent, and decide completion only from processed real-data results after threshold tuning."
