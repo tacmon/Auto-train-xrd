@@ -2,3 +2,5 @@ data/
 .env
 papers/
 local_cifs/
+data.bak/
+thought.md
