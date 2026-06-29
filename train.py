@@ -41,6 +41,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bins", type=int, default=256, help="Number of interpolated feature bins.")
     parser.add_argument("--max_files", type=int, default=0, help="Limit spectra; 0 means all.")
     parser.add_argument("--seed", type=int, default=7, help="Random seed for deterministic split.")
+    parser.add_argument("--target_formula", default="", help="Target formula/label A for negative-loop scoring.")
+    parser.add_argument("--candidate_formula", default="", help="Candidate negative formula/label for this run.")
+    parser.add_argument("--confidence_threshold", type=float, default=50.0, help="Target postprocess confidence threshold.")
     args, unknown = parser.parse_known_args()
     if unknown:
         print(json.dumps({"event": "ignored_platform_args", "args": unknown}, ensure_ascii=False), flush=True)
@@ -228,6 +231,32 @@ def featurize(sample: SpectrumSample, bins: int) -> np.ndarray:
     return np.concatenate([y, stats]).astype(np.float32)
 
 
+def fit_centroids(
+    features: np.ndarray,
+    targets: np.ndarray,
+    train_idx: np.ndarray,
+    labels: list[str],
+) -> np.ndarray:
+    centroids = []
+    for label_id in range(len(labels)):
+        label_features = features[train_idx][targets[train_idx] == label_id]
+        if len(label_features) == 0:
+            label_features = features[targets == label_id]
+        centroids.append(label_features.mean(axis=0))
+    return np.stack(centroids)
+
+
+def predict_with_confidence(batch: np.ndarray, centroid_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    distances = ((batch[:, None, :] - centroid_matrix[None, :, :]) ** 2).sum(axis=2)
+    pred = np.argmin(distances, axis=1)
+    if centroid_matrix.shape[0] == 1:
+        confidence = np.full(batch.shape[0], 100.0, dtype=np.float32)
+    else:
+        similarity = 1.0 / (distances + 1e-8)
+        confidence = similarity.max(axis=1) / similarity.sum(axis=1) * 100.0
+    return pred, confidence.astype(np.float32)
+
+
 def train_centroid_model(samples: list[SpectrumSample], bins: int, seed: int) -> dict:
     if not samples:
         raise ValueError("no valid spectra found")
@@ -243,20 +272,10 @@ def train_centroid_model(samples: list[SpectrumSample], bins: int, seed: int) ->
     train_idx = indices[:split]
     test_idx = indices[split:] if split < len(indices) else indices[:0]
 
-    centroids = []
-    for label_id in range(len(labels)):
-        label_features = features[train_idx][targets[train_idx] == label_id]
-        if len(label_features) == 0:
-            label_features = features[targets == label_id]
-        centroids.append(label_features.mean(axis=0))
-    centroid_matrix = np.stack(centroids)
+    centroid_matrix = fit_centroids(features, targets, train_idx, labels)
 
-    def predict(batch: np.ndarray) -> np.ndarray:
-        distances = ((batch[:, None, :] - centroid_matrix[None, :, :]) ** 2).sum(axis=2)
-        return np.argmin(distances, axis=1)
-
-    train_pred = predict(features[train_idx])
-    test_pred = predict(features[test_idx]) if len(test_idx) else np.asarray([], dtype=np.int64)
+    train_pred, _ = predict_with_confidence(features[train_idx], centroid_matrix)
+    test_pred, _ = predict_with_confidence(features[test_idx], centroid_matrix) if len(test_idx) else (np.asarray([], dtype=np.int64), np.asarray([], dtype=np.float32))
     return {
         "labels": labels,
         "label_to_id": label_to_id,
@@ -269,6 +288,136 @@ def train_centroid_model(samples: list[SpectrumSample], bins: int, seed: int) ->
         "train_accuracy": float(np.mean(train_pred == targets[train_idx])) if len(train_idx) else 0.0,
         "test_accuracy": float(np.mean(test_pred == targets[test_idx])) if len(test_idx) else None,
     }
+
+
+def selected_training_samples(samples: list[SpectrumSample], target: str, candidate: str) -> list[SpectrumSample]:
+    wanted = {x for x in [target, candidate] if x}
+    if len(wanted) < 2:
+        return samples
+    selected = [sample for sample in samples if sample.label in wanted]
+    if len({sample.label for sample in selected}) < 2:
+        raise ValueError(f"candidate run requires both target and candidate labels, got labels={sorted({sample.label for sample in selected})}")
+    return selected
+
+
+def score_predictions(rows: list[dict[str, object]], target: str, candidate: str) -> dict:
+    tp = fp = tn = fn = 0
+    labeled_rows = 0
+    target_predictions = 0
+    unidentified = 0
+    for row in rows:
+        truth = str(row["truth"])
+        pred = str(row["processed_prediction"])
+        is_target_truth = truth == target
+        is_target_pred = pred == target
+        if pred == "未识别":
+            unidentified += 1
+        if is_target_pred:
+            target_predictions += 1
+        if truth not in {target, candidate}:
+            continue
+        labeled_rows += 1
+        if is_target_truth and is_target_pred:
+            tp += 1
+        elif not is_target_truth and is_target_pred:
+            fp += 1
+        elif is_target_truth and not is_target_pred:
+            fn += 1
+        else:
+            tn += 1
+
+    def div(num: int, den: int) -> float | None:
+        return None if den == 0 else round(num / den, 6)
+
+    precision = div(tp, tp + fp)
+    recall = div(tp, tp + fn)
+    f1 = None if precision is None or recall is None or precision + recall == 0 else round(2 * precision * recall / (precision + recall), 6)
+    return {
+        "target_formula": target,
+        "candidate_formula": candidate,
+        "evaluation_mode": "weak_labels",
+        "decision": "pass" if (precision or 0) >= 0.85 and (recall or 0) >= 0.70 and (f1 or 0) >= 0.75 else "retry",
+        "counts": {
+            "total_rows": len(rows),
+            "labeled_rows": labeled_rows,
+            "target_predictions": target_predictions,
+            "unidentified_rows": unidentified,
+            "tp": tp,
+            "fp": fp,
+            "tn": tn,
+            "fn": fn,
+        },
+        "metrics": {
+            "coverage": div(labeled_rows, len(rows)),
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "target_prediction_ratio": div(target_predictions, len(rows)),
+            "unidentified_ratio": div(unidentified, len(rows)),
+        },
+    }
+
+
+def write_negative_loop_outputs(
+    output_root: Path,
+    samples: list[SpectrumSample],
+    model: dict,
+    args: argparse.Namespace,
+) -> dict | None:
+    target = (args.target_formula or "").strip()
+    candidate = (args.candidate_formula or "").strip()
+    if not target or not candidate:
+        return None
+
+    centroid_matrix = np.asarray(model["centroids"], dtype=np.float32)
+    rows: list[dict[str, object]] = []
+    for sample in samples:
+        feat = featurize(sample, int(model["feature_bins"]))[None, :]
+        pred_ids, confidences = predict_with_confidence(feat, centroid_matrix)
+        pred_label = model["labels"][int(pred_ids[0])]
+        confidence = float(confidences[0])
+        processed = pred_label if pred_label == target and confidence > args.confidence_threshold else "未识别"
+        rows.append(
+            {
+                "filename": str(sample.path),
+                "truth": sample.label,
+                "predicted": pred_label,
+                "confidence": round(confidence, 4),
+                "processed_prediction": processed,
+            }
+        )
+
+    result_csv = output_root / "result.csv"
+    with result_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["Filename", "Predicted phases", "Confidence", "Truth"])
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    "Filename": row["filename"],
+                    "Predicted phases": [row["predicted"]],
+                    "Confidence": [row["confidence"]],
+                    "Truth": row["truth"],
+                }
+            )
+
+    processed_csv = output_root / "processed_result.csv"
+    with processed_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["Filename", "Predicted phases", "Confidence", "Truth"])
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    "Filename": row["filename"],
+                    "Predicted phases": row["processed_prediction"],
+                    "Confidence": row["confidence"] if row["processed_prediction"] != "未识别" else "",
+                    "Truth": row["truth"],
+                }
+            )
+
+    score = score_predictions(rows, target, candidate)
+    (output_root / "score.json").write_text(json.dumps(score, ensure_ascii=False, indent=2), encoding="utf-8")
+    return score
 
 
 def write_outputs(
@@ -293,8 +442,14 @@ def write_outputs(
         "train_accuracy": model["train_accuracy"],
         "test_accuracy": model["test_accuracy"],
         "skipped_count": len(skipped),
+        "target_formula": args.target_formula,
+        "candidate_formula": args.candidate_formula,
     }
     metrics_file.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+    negative_loop_score = write_negative_loop_outputs(output_root, samples, model, args)
+    if negative_loop_score is not None:
+        metrics["negative_loop"] = negative_loop_score
+        metrics_file.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     manifest = {
         "entry": "train.py",
         "dataset_root": str(dataset_root),
@@ -307,11 +462,17 @@ def write_outputs(
             "bins": args.bins,
             "max_files": args.max_files,
             "seed": args.seed,
+            "target_formula": args.target_formula,
+            "candidate_formula": args.candidate_formula,
+            "confidence_threshold": args.confidence_threshold,
         },
         "artifacts": {
             "model": str(model_file),
             "metrics": str(metrics_file),
             "samples": str(sample_file),
+            "result_csv": str(output_root / "result.csv"),
+            "processed_result_csv": str(output_root / "processed_result.csv"),
+            "score_json": str(output_root / "score.json"),
         },
         "skipped": skipped[:50],
     }
@@ -351,8 +512,9 @@ def main() -> int:
     platform = prepare_platform_context()
     dataset_root, output_root, model_root = resolve_paths(args, platform)
     samples, skipped = load_samples(dataset_root, args.max_files)
-    model = train_centroid_model(samples, args.bins, args.seed)
-    write_outputs(output_root, model, samples, skipped, args, dataset_root, model_root)
+    train_samples = selected_training_samples(samples, args.target_formula.strip(), args.candidate_formula.strip())
+    model = train_centroid_model(train_samples, args.bins, args.seed)
+    write_outputs(output_root, model, train_samples, skipped, args, dataset_root, model_root)
     mirror_task_output(output_root, args.task_output)
     upload_platform_output()
     print(
