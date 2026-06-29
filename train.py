@@ -167,11 +167,14 @@ def resolve_paths(args: argparse.Namespace, platform: dict[str, str]) -> tuple[P
         raise FileNotFoundError("No dataset directory found. Pass --dataset or provide platform dataset_path.")
     dataset_root = select_dataset_root(dataset_root)
 
-    output_root = Path(
-        args.task_output
-        or platform.get("output_path", "")
+    platform_output = (
+        platform.get("output_path", "")
         or os.getenv("C2NET_OUTPUT_PATH", "")
         or os.getenv("OPENI_OUTPUT_PATH", "")
+    )
+    output_root = Path(
+        platform_output
+        or args.task_output
         or (repo_root / "outputs" / "openi-xrd-training")
     ).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -185,6 +188,33 @@ def resolve_paths(args: argparse.Namespace, platform: dict[str, str]) -> tuple[P
         ]
     )
     return dataset_root, output_root, model_root
+
+
+def mirror_task_output(output_root: Path, requested_output: str) -> None:
+    requested = (requested_output or "").strip()
+    if not requested:
+        return
+    target = Path(requested).expanduser().resolve()
+    if target == output_root:
+        return
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        for item in output_root.iterdir():
+            if item.is_file():
+                shutil.copy2(item, target / item.name)
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "event": "mirror_task_output_failed",
+                    "source": str(output_root),
+                    "target": str(target),
+                    "error": str(exc),
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
 
 
 def spectrum_files(dataset_root: Path, max_files: int) -> list[Path]:
@@ -393,6 +423,7 @@ def main() -> int:
     samples, skipped = load_samples(dataset_root, args.max_files)
     model = train_centroid_model(samples, args.bins, args.seed)
     write_outputs(output_root, model, samples, skipped, args, dataset_root, model_root)
+    mirror_task_output(output_root, args.task_output)
     upload_platform_output()
     print(
         json.dumps(
