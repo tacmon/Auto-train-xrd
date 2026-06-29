@@ -54,7 +54,8 @@ def parse_args() -> argparse.Namespace:
 def expand_known_formulas(values: list[str]) -> list[str]:
     out: list[str] = []
     for value in values:
-        for item in str(value).split(","):
+        normalized = str(value).replace("+", ",")
+        for item in normalized.split(","):
             item = item.strip()
             if item and item not in out:
                 out.append(item)
