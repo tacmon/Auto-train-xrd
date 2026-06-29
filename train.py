@@ -43,11 +43,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=7, help="Random seed for deterministic split.")
     parser.add_argument("--target_formula", default="", help="Target formula/label A for negative-loop scoring.")
     parser.add_argument("--candidate_formula", default="", help="Candidate negative formula/label for this run.")
+    parser.add_argument("--known_formula", action="append", default=[], help="Known measured-data weak label. Repeatable.")
     parser.add_argument("--confidence_threshold", type=float, default=50.0, help="Target postprocess confidence threshold.")
     args, unknown = parser.parse_known_args()
     if unknown:
         print(json.dumps({"event": "ignored_platform_args", "args": unknown}, ensure_ascii=False), flush=True)
     return args
+
+
+def expand_known_formulas(values: list[str]) -> list[str]:
+    out: list[str] = []
+    for value in values:
+        for item in str(value).split(","):
+            item = item.strip()
+            if item and item not in out:
+                out.append(item)
+    return out
 
 
 def prepare_platform_context() -> dict[str, str]:
@@ -171,7 +182,7 @@ def infer_label(path: Path, dataset_root: Path) -> str:
             return rel.parts[0]
     except ValueError:
         pass
-    match = re.match(r"([A-Za-z]+[0-9]+)", path.stem)
+    match = re.search(r"([A-Za-z]+[0-9]+)", path.stem)
     return match.group(1) if match else "unknown"
 
 
@@ -211,6 +222,14 @@ def load_samples(dataset_root: Path, max_files: int) -> tuple[list[SpectrumSampl
         except Exception as exc:
             skipped.append({"path": str(path), "reason": str(exc)})
     return samples, skipped
+
+
+def split_train_measured_roots(dataset_root: Path) -> tuple[Path, Path]:
+    train_root = dataset_root / "train"
+    measured_root = dataset_root / "measured"
+    if train_root.is_dir() and measured_root.is_dir():
+        return train_root, measured_root
+    return dataset_root, dataset_root
 
 
 def featurize(sample: SpectrumSample, bins: int) -> np.ndarray:
@@ -300,11 +319,13 @@ def selected_training_samples(samples: list[SpectrumSample], target: str, candid
     return selected
 
 
-def score_predictions(rows: list[dict[str, object]], target: str, candidate: str) -> dict:
+def score_predictions(rows: list[dict[str, object]], target: str, candidate: str, known_formulas: list[str]) -> dict:
     tp = fp = tn = fn = 0
     labeled_rows = 0
     target_predictions = 0
     unidentified = 0
+    known = set(known_formulas or [target, candidate])
+    known.add(target)
     for row in rows:
         truth = str(row["truth"])
         pred = str(row["processed_prediction"])
@@ -314,7 +335,7 @@ def score_predictions(rows: list[dict[str, object]], target: str, candidate: str
             unidentified += 1
         if is_target_pred:
             target_predictions += 1
-        if truth not in {target, candidate}:
+        if truth not in known:
             continue
         labeled_rows += 1
         if is_target_truth and is_target_pred:
@@ -335,6 +356,7 @@ def score_predictions(rows: list[dict[str, object]], target: str, candidate: str
     return {
         "target_formula": target,
         "candidate_formula": candidate,
+        "known_formulas": sorted(known),
         "evaluation_mode": "weak_labels",
         "decision": "pass" if (precision or 0) >= 0.85 and (recall or 0) >= 0.70 and (f1 or 0) >= 0.75 else "retry",
         "counts": {
@@ -360,7 +382,7 @@ def score_predictions(rows: list[dict[str, object]], target: str, candidate: str
 
 def write_negative_loop_outputs(
     output_root: Path,
-    samples: list[SpectrumSample],
+    measured_samples: list[SpectrumSample],
     model: dict,
     args: argparse.Namespace,
 ) -> dict | None:
@@ -371,7 +393,7 @@ def write_negative_loop_outputs(
 
     centroid_matrix = np.asarray(model["centroids"], dtype=np.float32)
     rows: list[dict[str, object]] = []
-    for sample in samples:
+    for sample in measured_samples:
         feat = featurize(sample, int(model["feature_bins"]))[None, :]
         pred_ids, confidences = predict_with_confidence(feat, centroid_matrix)
         pred_label = model["labels"][int(pred_ids[0])]
@@ -415,7 +437,7 @@ def write_negative_loop_outputs(
                 }
             )
 
-    score = score_predictions(rows, target, candidate)
+    score = score_predictions(rows, target, candidate, expand_known_formulas(args.known_formula))
     (output_root / "score.json").write_text(json.dumps(score, ensure_ascii=False, indent=2), encoding="utf-8")
     return score
 
@@ -423,7 +445,8 @@ def write_negative_loop_outputs(
 def write_outputs(
     output_root: Path,
     model: dict,
-    samples: list[SpectrumSample],
+    train_samples: list[SpectrumSample],
+    measured_samples: list[SpectrumSample],
     skipped: list[dict[str, str]],
     args: argparse.Namespace,
     dataset_root: Path,
@@ -446,13 +469,15 @@ def write_outputs(
         "candidate_formula": args.candidate_formula,
     }
     metrics_file.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
-    negative_loop_score = write_negative_loop_outputs(output_root, samples, model, args)
+    negative_loop_score = write_negative_loop_outputs(output_root, measured_samples, model, args)
     if negative_loop_score is not None:
         metrics["negative_loop"] = negative_loop_score
         metrics_file.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     manifest = {
         "entry": "train.py",
         "dataset_root": str(dataset_root),
+        "train_sample_count": len(train_samples),
+        "measured_sample_count": len(measured_samples),
         "pretrain_model_root": str(model_root) if model_root else "",
         "task_output": str(output_root),
         "hyperparameters": {
@@ -464,6 +489,7 @@ def write_outputs(
             "seed": args.seed,
             "target_formula": args.target_formula,
             "candidate_formula": args.candidate_formula,
+            "known_formula": expand_known_formulas(args.known_formula),
             "confidence_threshold": args.confidence_threshold,
         },
         "artifacts": {
@@ -481,7 +507,7 @@ def write_outputs(
     with sample_file.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["path", "label", "points"])
         writer.writeheader()
-        for sample in samples:
+        for sample in train_samples:
             writer.writerow({"path": str(sample.path), "label": sample.label, "points": int(sample.x.size)})
 
 
@@ -511,10 +537,16 @@ def main() -> int:
     args = parse_args()
     platform = prepare_platform_context()
     dataset_root, output_root, model_root = resolve_paths(args, platform)
-    samples, skipped = load_samples(dataset_root, args.max_files)
+    train_root, measured_root = split_train_measured_roots(dataset_root)
+    samples, skipped = load_samples(train_root, args.max_files)
+    measured_samples, measured_skipped = load_samples(measured_root, 0)
+    skipped.extend(measured_skipped)
     train_samples = selected_training_samples(samples, args.target_formula.strip(), args.candidate_formula.strip())
+    measured_known = set(expand_known_formulas(args.known_formula) or [args.target_formula.strip(), args.candidate_formula.strip()])
+    measured_known.add(args.target_formula.strip())
+    measured_selected = [sample for sample in measured_samples if sample.label in measured_known]
     model = train_centroid_model(train_samples, args.bins, args.seed)
-    write_outputs(output_root, model, train_samples, skipped, args, dataset_root, model_root)
+    write_outputs(output_root, model, train_samples, measured_selected, skipped, args, dataset_root, model_root)
     mirror_task_output(output_root, args.task_output)
     upload_platform_output()
     print(
