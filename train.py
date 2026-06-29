@@ -15,6 +15,8 @@ import os
 import re
 import shutil
 import sys
+import tempfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -86,6 +88,70 @@ def first_existing_path(candidates: Iterable[str | Path]) -> Path | None:
     return None
 
 
+def _count_spectrum_files(path: Path) -> int:
+    if path.is_file():
+        return int(path.suffix.lower() in SPECTRUM_EXTENSIONS)
+    return sum(
+        1
+        for candidate in path.rglob("*")
+        if candidate.is_file() and candidate.suffix.lower() in SPECTRUM_EXTENSIONS
+    )
+
+
+def _extract_zip_dataset(path: Path) -> Path | None:
+    zip_files: list[Path] = []
+    if path.is_file() and path.suffix.lower() == ".zip":
+        zip_files = [path]
+    elif path.is_dir():
+        zip_files = sorted(p for p in path.rglob("*.zip") if p.is_file())
+    if not zip_files:
+        return None
+
+    extract_root = Path(tempfile.mkdtemp(prefix="autotrain_xrd_dataset_"))
+    try:
+        with zipfile.ZipFile(zip_files[0], "r") as zf:
+            zf.extractall(extract_root)
+    except Exception:
+        shutil.rmtree(extract_root, ignore_errors=True)
+        return None
+    return extract_root
+
+
+def select_dataset_root(path: Path) -> Path:
+    if _count_spectrum_files(path) > 0:
+        return path
+
+    extracted = _extract_zip_dataset(path)
+    candidates: list[Path] = []
+    if extracted is not None:
+        candidates.append(extracted)
+        candidates.extend(p for p in extracted.rglob("*") if p.is_dir())
+    if path.is_dir():
+        candidates.extend(p for p in path.rglob("*") if p.is_dir())
+
+    ranked = sorted(
+        ((candidate, _count_spectrum_files(candidate)) for candidate in candidates),
+        key=lambda item: (item[1], len(item[0].parts)),
+        reverse=True,
+    )
+    if ranked and ranked[0][1] > 0:
+        selected = ranked[0][0]
+        print(
+            json.dumps(
+                {
+                    "event": "selected_dataset_root",
+                    "input": str(path),
+                    "selected": str(selected),
+                    "spectra": ranked[0][1],
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+        return selected
+    return path
+
+
 def resolve_paths(args: argparse.Namespace, platform: dict[str, str]) -> tuple[Path, Path, Path | None]:
     repo_root = Path(__file__).resolve().parent
     dataset_root = first_existing_path(
@@ -99,6 +165,7 @@ def resolve_paths(args: argparse.Namespace, platform: dict[str, str]) -> tuple[P
     )
     if dataset_root is None:
         raise FileNotFoundError("No dataset directory found. Pass --dataset or provide platform dataset_path.")
+    dataset_root = select_dataset_root(dataset_root)
 
     output_root = Path(
         args.task_output
