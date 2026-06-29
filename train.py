@@ -19,7 +19,7 @@ from typing import Iterable
 import numpy as np
 
 
-SPECTRUM_EXTENSIONS = {".txt", ".xy", ".gk", ".xrd", ".csv"}
+SPECTRUM_EXTENSIONS = {".txt", ".xy", ".gk", ".xrd", ".csv", ".cif"}
 
 
 @dataclass
@@ -188,6 +188,9 @@ def infer_label(path: Path, dataset_root: Path) -> str:
 
 
 def parse_numeric_pairs(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    if path.suffix.lower() == ".cif":
+        return parse_cif_as_theoretical_spectrum(path)
+
     xs: list[float] = []
     ys: list[float] = []
     with path.open("r", encoding="utf-8", errors="ignore") as handle:
@@ -211,6 +214,86 @@ def parse_numeric_pairs(path: Path) -> tuple[np.ndarray, np.ndarray]:
         raise ValueError(f"not enough numeric XRD points in {path}")
     order = np.argsort(np.asarray(xs, dtype=np.float32))
     return np.asarray(xs, dtype=np.float32)[order], np.asarray(ys, dtype=np.float32)[order]
+
+
+def _first_cif_number(text: str, key: str, default: float) -> float:
+    match = re.search(rf"^{re.escape(key)}\s+([0-9.+\-eE]+)", text, flags=re.MULTILINE)
+    if not match:
+        return default
+    try:
+        return float(match.group(1).strip("()"))
+    except ValueError:
+        return default
+
+
+def _cif_atom_rows(text: str) -> list[tuple[str, float, float, float]]:
+    rows: list[tuple[str, float, float, float]] = []
+    in_atom_loop = False
+    headers: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line == "loop_":
+            in_atom_loop = False
+            headers = []
+            continue
+        if line.startswith("_atom_site_"):
+            in_atom_loop = True
+            headers.append(line)
+            continue
+        if not in_atom_loop or line.startswith("_"):
+            continue
+        parts = line.split()
+        if len(parts) < len(headers):
+            continue
+
+        def get(header_suffix: str) -> str | None:
+            for idx, header in enumerate(headers):
+                if header.endswith(header_suffix) and idx < len(parts):
+                    return parts[idx]
+            return None
+
+        symbol = get("type_symbol") or get("label")
+        fx = get("fract_x")
+        fy = get("fract_y")
+        fz = get("fract_z")
+        if symbol is None or fx is None or fy is None or fz is None:
+            continue
+        try:
+            rows.append((re.sub(r"[^A-Za-z]", "", symbol) or symbol, float(fx), float(fy), float(fz)))
+        except ValueError:
+            continue
+    return rows
+
+
+def parse_cif_as_theoretical_spectrum(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Create a deterministic pseudo-XRD spectrum from simple CIF geometry.
+
+    This is a dependency-light platform test surrogate. It is not a replacement
+    for the original Novel-Space crystallographic simulation pipeline.
+    """
+
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    a = _first_cif_number(text, "_cell_length_a", 5.0)
+    b = _first_cif_number(text, "_cell_length_b", a)
+    c = _first_cif_number(text, "_cell_length_c", a)
+    atoms = _cif_atom_rows(text)
+    if not atoms:
+        raise ValueError(f"no atom fractional coordinates found in CIF: {path}")
+
+    grid = np.linspace(10.0, 70.0, 900, dtype=np.float32)
+    intensity = np.full(grid.shape, 0.04, dtype=np.float32)
+    metric = np.asarray([a, b, c], dtype=np.float32)
+    for idx, (symbol, fx, fy, fz) in enumerate(atoms):
+        code = sum(ord(ch) for ch in symbol)
+        frac = np.asarray([fx, fy, fz], dtype=np.float32)
+        projected = float(np.dot(frac + 0.17 * (idx + 1), metric))
+        center = 12.0 + ((projected * 7.0 + code + idx * 11.0) % 55.0)
+        width = 0.18 + 0.04 * (idx % 4)
+        height = 0.7 + (code % 9) / 10.0
+        intensity += height * np.exp(-0.5 * ((grid - center) / width) ** 2)
+    return grid, intensity.astype(np.float32)
 
 
 def load_samples(dataset_root: Path, max_files: int) -> tuple[list[SpectrumSample], list[dict[str, str]]]:
