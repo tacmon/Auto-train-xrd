@@ -46,7 +46,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bins", type=int, default=256, help="Number of interpolated XRD feature bins.")
     parser.add_argument("--max_files", type=int, default=0, help="Limit spectra for quick validation; 0 means all.")
     parser.add_argument("--seed", type=int, default=7, help="Random seed for deterministic split.")
-    return parser.parse_args()
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        print(
+            json.dumps(
+                {
+                    "event": "ignored_platform_args",
+                    "args": unknown,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+    return args
 
 
 def prepare_platform_context() -> dict[str, str]:
